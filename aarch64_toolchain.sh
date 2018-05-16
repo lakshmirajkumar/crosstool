@@ -1,11 +1,11 @@
 #! /bin/bash
 set -e
-trap 'previous_command=$this_command; this_command=$BASH_COMMAND' DEBUG
-trap 'echo FAILED COMMAND: $previous_command' EXIT
+set -x
 
 TOPDIR=${PWD}
 SRCDIR=$TOPDIR/sources
 BLDDIR=$TOPDIR/build
+DEBDIR=$TOPDIR/deb
 INSTALL_PATH=$TOPDIR/install
 TARGET=aarch64-linux-gnu
 USE_NEWLIB=0
@@ -25,7 +25,34 @@ export PATH=$INSTALL_PATH/bin:$PATH
 
 rm -rf $SRCDIR;mkdir -p $SRCDIR
 rm -rf $BLDDIR;mkdir -p $BLDDIR
-rm -rf $INSTALL_PATH;mkdir -p $INSTALL_PATH
+rm -rf $DEBDIR;mkdir -p $DEBDIR
+
+function create_deb {
+	cd $INSTALL_PATH
+	mkdir debian;mkdir -p debian/control
+	find * -type f | sort | xargs md5sum > debian/control/md5sums
+	tar c -z --owner=root --group=root -f $DEBDIR/data.tar.gz ./
+	
+	cd debian/control;
+	SIZE=`du -s $INSTALL_PATH | cut -f1`
+	VER=`cat $1 |cut -d "-" -f 2`
+	cat > control << EOF
+Package: $1
+Source: $1
+Version: $VER
+Installed-Size: $SIZE
+Maintainer: Andre Przywara <osp@andrep.de>
+Architecture: LINUX_ARCH
+Section: devel
+Priority: extra
+EOF
+	tar c -z --owner=root --group=root -f $DEBDIR/control.tar.gz ./
+	echo "2.0" > $DEBDIR/debian-binary
+	cd ../
+	ar q $DEBDIR/$1-${TARGET}.deb $DEBDIR/debian-binary $DEBDIR/control.tar.gz $DEBDIR/data.tar.gz
+	rm -rf $DEBDIR/control.tar.gz $DEBDIR/data.tar.gz $DEBDIR/debian-binary
+	rm -rf $INSTALL_PATH/debian
+}
 
 # Download packages
 cd $SRCDIR
@@ -58,21 +85,17 @@ cd $TOPDIR
 
 # Step 1. Binutils
 mkdir -p $BLDDIR/build-binutils
+rm -rf $INSTALL_PATH;mkdir -p $INSTALL_PATH
 cd $BLDDIR/build-binutils
 $SRCDIR/$BINUTILS_VERSION/configure --prefix=$INSTALL_PATH --target=$TARGET $CONFIGURATION_OPTIONS
 make $PARALLEL_MAKE
 make install
+create_deb $BINUTILS_VERSION
 cd $TOPDIR
-
-# Step 2. Linux Kernel Headers
-if [ $USE_NEWLIB -eq 0 ]; then
-    cd $SRCDIR/$LINUX_KERNEL_VERSION
-    make ARCH=$LINUX_ARCH INSTALL_HDR_PATH=$INSTALL_PATH/$TARGET headers_install
-    cd $TOPDIR
-fi
 
 # Step 3. C/C++ Compilers
 mkdir -p $BLDDIR/build-gcc
+#rm -rf $INSTALL_PATH;mkdir -p $INSTALL_PATH
 cd $BLDDIR/build-gcc
 if [ $USE_NEWLIB -ne 0 ]; then
 	NEWLIB_OPTION=--with-newlib 
@@ -80,17 +103,25 @@ fi
 $SRCDIR/$GCC_VERSION/configure --prefix=$INSTALL_PATH --target=$TARGET --enable-languages=c,c++ $CONFIGURATION_OPTIONS $NEWLIB_OPTION
 make $PARALLEL_MAKE all-gcc
 make install-gcc
+create_deb $GCC_VERSION
 cd $TOPDIR
 
 if [ $USE_NEWLIB -ne 0 ]; then
     # Steps 4-6: Newlib
     mkdir -p $BLDDIR/build-newlib
+    #rm -rf $INSTALL_PATH;mkdir -p $INSTALL_PATH
     cd $BLDDIR/build-newlib
     $SRCDIR/newlib-master/configure --prefix=$INSTALL_PATH --target=$TARGET $CONFIGURATION_OPTIONS
     make $PARALLEL_MAKE
     make install
+    create_deb "newlib" 
     cd $TOPDIR
 else
+    # Step 2. Linux Kernel Headers
+    #rm -rf $INSTALL_PATH;mkdir -p $INSTALL_PATH 
+    cd $SRCDIR/$LINUX_KERNEL_VERSION
+    make ARCH=$LINUX_ARCH INSTALL_HDR_PATH=$INSTALL_PATH/$TARGET headers_install
+    cd $TOPDIR
     # Step 4. Standard C Library Headers and Startup Files
     mkdir -p $BLDDIR/build-glibc
     cd $BLDDIR/build-glibc
@@ -108,7 +139,7 @@ else
     make install-target-libgcc
     cd $TOPDIR
 
-    # Step 6. Standard C Library & the rest of Glibc
+   # Step 6. Standard C Library & the rest of Glibc
     cd $BLDDIR/build-glibc
     make $PARALLEL_MAKE
     make install
@@ -120,6 +151,6 @@ cd $BLDDIR/build-gcc
 make $PARALLEL_MAKE all
 make install
 cd $TOPDIR
+create_deb $GLIBC_VERSION 
 
-trap - EXIT
 echo 'Success!'
